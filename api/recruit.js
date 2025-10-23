@@ -1,12 +1,13 @@
-// api/recruit.js (Node / Vercel Edge Function)
+// api/recruit.js
 import { NextResponse } from 'next/server';
 
-const RATE_LIMIT_WINDOW = 10 * 60 * 1000; // 10 minutes
-const MAX_REQUESTS_PER_IP = 3;
-const ipRequests = new Map(); // ephemeral memory (resets on function cold start)
+const RATE_LIMIT_WINDOW = 24 * 60 * 60 * 1000; // 24 hours
+const MAX_REQUESTS_PER_IP = 1;
+const ipRequests = new Map(); // resets when function cold starts
 
 export async function POST(req) {
   try {
+    // Extract IP
     const ip =
       req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
       req.ip ||
@@ -15,44 +16,46 @@ export async function POST(req) {
     const now = Date.now();
     const entry = ipRequests.get(ip) || { count: 0, start: now };
 
+    // Reset count if 24h window passed
     if (now - entry.start > RATE_LIMIT_WINDOW) {
       entry.count = 0;
       entry.start = now;
     }
+
     entry.count++;
     ipRequests.set(ip, entry);
 
+    // Block if exceeded 1 per day
     if (entry.count > MAX_REQUESTS_PER_IP) {
       return NextResponse.json(
-        { error: 'Too many submissions. Try again later.' },
+        { error: 'You can only submit once per day. Try again tomorrow.' },
         { status: 429 }
       );
     }
 
-    // Parse incoming JSON body
+    // Parse submitted data
     const data = await req.json();
 
-    // Example: Relay to Discord (or your existing logic)
+    // === Discord relay ===
     const discordWebhook =
-      process.env.DISCORD_WEBHOOK_URL || 'https://discord.com/api/webhooks/...';
-    const msg = {
-      embeds: [
-        {
-          title: '🎯 New Recruitment Submission',
-          color: 16766720, // gold-ish
-          fields: Object.entries(data).map(([k, v]) => ({
-            name: k,
-            value: v || '—',
-            inline: false
-          })),
-          timestamp: new Date().toISOString()
-        }
-      ]
+      process.env.DISCORD_WEBHOOK_URL ||
+      'https://discord.com/api/webhooks/...'; // replace with yours
+
+    const embed = {
+      title: '🎯 New Recruitment Submission',
+      color: 16766720, // gold tone
+      fields: Object.entries(data).map(([k, v]) => ({
+        name: k,
+        value: v || '—',
+        inline: false
+      })),
+      timestamp: new Date().toISOString()
     };
+
     await fetch(discordWebhook, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(msg)
+      body: JSON.stringify({ embeds: [embed] })
     });
 
     return NextResponse.json({ ok: true });
