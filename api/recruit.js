@@ -1,41 +1,63 @@
-// api/recruit.js
-export default async function handler(req, res) {
-  // Basic CORS (safe if your site is on another domain)
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+// api/recruit.js (Node / Vercel Edge Function)
+import { NextResponse } from 'next/server';
 
-  const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
-  if (!DISCORD_WEBHOOK) return res.status(500).send("Missing webhook");
+const RATE_LIMIT_WINDOW = 10 * 60 * 1000; // 10 minutes
+const MAX_REQUESTS_PER_IP = 3;
+const ipRequests = new Map(); // ephemeral memory (resets on function cold start)
 
-  const { name, email, role, region, video, youtube, twitter, portfolio, message } = req.body || {};
-  if (!name || !email || !role || !video) return res.status(400).send("Missing required fields");
+export async function POST(req) {
+  try {
+    const ip =
+      req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+      req.ip ||
+      'unknown';
 
-  const embed = {
-    title: "New Recruitment Submission",
-    color: 0xf3c300,
-    fields: [
-      { name: "Name", value: String(name), inline: true },
-      { name: "Email", value: String(email), inline: true },
-      { name: "Role", value: String(role), inline: true },
-      ...(region ? [{ name: "Region", value: String(region), inline: true }] : []),
-      { name: "Video Link", value: String(video), inline: false },
-      ...(youtube ? [{ name: "YouTube", value: String(youtube), inline: true }] : []),
-      ...(twitter ? [{ name: "Twitter", value: String(twitter), inline: true }] : []),
-      ...(portfolio ? [{ name: "Portfolio", value: String(portfolio), inline: false }] : []),
-      ...(message ? [{ name: "About", value: String(message), inline: false }] : []),
-    ],
-    timestamp: new Date().toISOString(),
-  };
+    const now = Date.now();
+    const entry = ipRequests.get(ip) || { count: 0, start: now };
 
-  const r = await fetch(DISCORD_WEBHOOK, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: "Essence Recruit Bot", embeds: [embed] }),
-  });
+    if (now - entry.start > RATE_LIMIT_WINDOW) {
+      entry.count = 0;
+      entry.start = now;
+    }
+    entry.count++;
+    ipRequests.set(ip, entry);
 
-  if (!r.ok) return res.status(502).send("Discord error");
-  res.status(200).json({ ok: true });
+    if (entry.count > MAX_REQUESTS_PER_IP) {
+      return NextResponse.json(
+        { error: 'Too many submissions. Try again later.' },
+        { status: 429 }
+      );
+    }
+
+    // Parse incoming JSON body
+    const data = await req.json();
+
+    // Example: Relay to Discord (or your existing logic)
+    const discordWebhook =
+      process.env.DISCORD_WEBHOOK_URL || 'https://discord.com/api/webhooks/...';
+    const msg = {
+      embeds: [
+        {
+          title: '🎯 New Recruitment Submission',
+          color: 16766720, // gold-ish
+          fields: Object.entries(data).map(([k, v]) => ({
+            name: k,
+            value: v || '—',
+            inline: false
+          })),
+          timestamp: new Date().toISOString()
+        }
+      ]
+    };
+    await fetch(discordWebhook, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(msg)
+    });
+
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    console.error('Recruit API error:', err);
+    return NextResponse.json({ error: 'Server error' }, { status: 500 });
+  }
 }
