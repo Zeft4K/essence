@@ -1,9 +1,6 @@
-// Vercel Serverless Function (No Framework)
-// Path: /api/recruit
+// api/recruit.js
 const RATE_LIMIT_WINDOW = 24 * 60 * 60 * 1000; // 24h
 const MAX_REQUESTS_PER_IP = 1;
-
-// In-memory map (resets on cold start; use Redis/KV for persistence)
 const ipRequests = global.ipRequests || new Map();
 if (!global.ipRequests) global.ipRequests = ipRequests;
 
@@ -22,33 +19,18 @@ function setCors(res, origin) {
 
 export default async function handler(req, res) {
   setCors(res, req.headers.origin);
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
-  }
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed' });
-  }
-
-  // Rate limit
   const ip = getIP(req);
   const now = Date.now();
   const entry = ipRequests.get(ip) || { count: 0, start: now };
+  if (now - entry.start > RATE_LIMIT_WINDOW) { entry.count = 0; entry.start = now; }
+  entry.count++; ipRequests.set(ip, entry);
 
-  if (now - entry.start > RATE_LIMIT_WINDOW) {
-    entry.count = 0;
-    entry.start = now;
-  }
-  entry.count += 1;
-  ipRequests.set(ip, entry);
+  if (entry.count > MAX_REQUESTS_PER_IP)
+    return res.status(429).json({ error: 'You can only submit once per day. Try again tomorrow.' });
 
-  if (entry.count > MAX_REQUESTS_PER_IP) {
-    return res
-      .status(429)
-      .json({ error: 'You can only submit once per day. Try again tomorrow.' });
-  }
-
-  // Parse body
   let data;
   try {
     data = req.body && typeof req.body === 'object' ? req.body : JSON.parse(await readReqBody(req));
@@ -61,20 +43,18 @@ export default async function handler(req, res) {
     video = '', youtube = '', twitter = '', portfolio = '', message = ''
   } = data || {};
 
-  if (!name || !email || !role || !video) {
+  if (!name || !email || !role || !video)
     return res.status(400).json({ error: 'Missing required fields' });
-  }
 
-  // Discord webhook (supports either env var name)
   const DISCORD_WEBHOOK =
     process.env.DISCORD_WEBHOOK_URL || process.env.DISCORD_WEBHOOK;
-
-  if (!DISCORD_WEBHOOK) {
+  if (!DISCORD_WEBHOOK)
     return res.status(500).json({ error: 'Missing Discord webhook env var' });
-  }
+
+  const ROLE_ID = '1416660435876450344';
 
   const embed = {
-    title: 'New Recruitment Submission',
+    title: '🎯 New Recruitment Submission',
     color: 0xF3C300,
     fields: [
       { name: 'Name', value: String(name), inline: true },
@@ -90,11 +70,19 @@ export default async function handler(req, res) {
     timestamp: new Date().toISOString(),
   };
 
+  // 👇 Tag @Essence Leads in the message
+  const payload = {
+    content: `<@&${ROLE_ID}> New recruitment submission received.`,
+    username: 'Essence Recruit Bot',
+    allowed_mentions: { parse: ['roles'] },
+    embeds: [embed],
+  };
+
   try {
     const r = await fetch(DISCORD_WEBHOOK, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: 'Essence Recruit Bot', embeds: [embed] }),
+      body: JSON.stringify(payload),
     });
     if (!r.ok) {
       const text = await r.text().catch(() => '');
