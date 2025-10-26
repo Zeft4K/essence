@@ -1,77 +1,73 @@
-import { sendCookie, json } from '../_lib.js';
+const crypto = require('crypto');
 
-async function tokenFromCode(code){
-  const body = new URLSearchParams({
-    client_id: process.env.DISCORD_CLIENT_ID,
-    client_secret: process.env.DISCORD_CLIENT_SECRET,
-    grant_type: 'authorization_code',
-    code,
-    redirect_uri: process.env.DISCORD_REDIRECT_URI
-  });
-  const r = await fetch('https://discord.com/api/oauth2/token', {
-    method:'POST',
-    headers:{ 'Content-Type':'application/x-www-form-urlencoded' },
-    body
-  });
-  if(!r.ok) throw new Error('oauth token error');
-  return r.json();
+function b64url(input) {
+  return Buffer.from(input).toString('base64').replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
+}
+function sign(payload, secret, expSec = 60*60*24*7) {
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const now = Math.floor(Date.now()/1000);
+  const body = { ...payload, iat: now, exp: now + expSec };
+  const h = b64url(JSON.stringify(header));
+  const p = b64url(JSON.stringify(body));
+  const s = b64url(crypto.createHmac('sha256', secret).update(`${h}.${p}`).digest());
+  return `${h}.${p}.${s}`;
+}
+function cookie(name, val, { maxAge } = {}) {
+  const parts = [`${name}=${val}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Secure'];
+  if (maxAge) parts.push(`Max-Age=${maxAge}`);
+  return parts.join('; ');
 }
 
-async function getUser(access_token){
-  const r = await fetch('https://discord.com/api/users/@me', {
-    headers: { Authorization: `Bearer ${access_token}` }
-  });
-  if(!r.ok) throw new Error('user fetch error');
-  return r.json();
-}
+module.exports = async (req, res) => {
+  try {
+    const { DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, JWT_SECRET, COOKIE_NAME = 'te_sess' } = process.env;
 
-async function getGuildMember(userId){
-  // Requires your bot in the guild + "Server Members Intent"
-  const r = await fetch(`https://discord.com/api/guilds/${process.env.DISCORD_GUILD_ID}/members/${userId}`, {
-    headers: { Authorization: process.env.DISCORD_BOT_TOKEN }
-  });
-  if(!r.ok) return null;
-  return r.json();
-}
+    const code = req.query.code;
+    if (!code) { res.statusCode = 400; return res.end('Missing ?code'); }
 
-export default async function handler(req, res){
-  try{
-    const { searchParams } = new URL(req.url, 'http://localhost');
-    const code = searchParams.get('code');
-    if(!code) return json(res, 400, { error:'missing code' });
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const proto = (req.headers['x-forwarded-proto'] || 'https');
+    const redirectUri = `${proto}://${host}/api/auth/callback`;
 
-    const token = await tokenFromCode(code);
-    const me = await getUser(token.access_token);
-    const member = await getGuildMember(me.id);
-
-    const roles = Array.isArray(member?.roles) ? member.roles : [];
-    // You can map role IDs to friendly names here:
-    // Example mapping:
-    const map = {
-      'ROLE_ID_BRONZE':'Bronze Gear',
-      'ROLE_ID_SILVER':'Silver Gear',
-      'ROLE_ID_GOLDEN':'Golden Gear',
-      'ROLE_ID_ONYX':'Onyx Guard',
-      'ROLE_ID_DIAMOND':'Diamond Gear'
-    };
-    const friendly = roles.map(r => map[r]).filter(Boolean);
-
-    const avatar_url = me.avatar
-      ? `https://cdn.discordapp.com/avatars/${me.id}/${me.avatar}.png?size=64`
-      : 'https://cdn.discordapp.com/embed/avatars/0.png';
-
-    sendCookie(res, {
-      sub: me.id,
-      username: me.username,
-      discriminator: me.discriminator,
-      avatar_url,
-      roles: friendly
+    const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+      body: new URLSearchParams({
+        client_id: DISCORD_CLIENT_ID,
+        client_secret: DISCORD_CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: redirectUri,
+      })
     });
+    const token = await tokenRes.json();
+    if (!tokenRes.ok || !token.access_token) {
+      console.error('Token error:', token);
+      res.statusCode = 500; return res.end('Token exchange failed');
+    }
 
-    // Redirect back to page user came from (or home)
+    const meRes = await fetch('https://discord.com/api/users/@me', {
+      headers: { Authorization: `Bearer ${token.access_token}` }
+    });
+    const user = await meRes.json();
+    if (!meRes.ok || !user?.id) {
+      console.error('User error:', user);
+      res.statusCode = 500; return res.end('User fetch failed');
+    }
+
+    const jwt = sign({
+      sub: user.id,
+      name: user.global_name || user.username,
+      avatar: user.avatar || null,
+      prov: 'discord',
+    }, JWT_SECRET);
+
+    res.setHeader('Set-Cookie', cookie(COOKIE_NAME, jwt, { maxAge: 60*60*24*7 }));
     res.writeHead(302, { Location: '/' });
     res.end();
-  } catch (e){
-    json(res, 500, { error: String(e) });
+  } catch (e) {
+    console.error(e);
+    res.statusCode = 500;
+    res.end('Auth failed');
   }
-}
+};
