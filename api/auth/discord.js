@@ -1,11 +1,18 @@
-export default async function handler(req, res){
+module.exports = (req, res) => {
+  const { DISCORD_CLIENT_ID, DISCORD_SCOPE = 'identify guilds' } = process.env;
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  const proto = (req.headers['x-forwarded-proto'] || 'https');
+  const redirectUri = `${proto}://${host}/api/auth/callback`;
+
   const params = new URLSearchParams({
-    client_id: process.env.DISCORD_CLIENT_ID,
     response_type: 'code',
-    redirect_uri: process.env.DISCORD_REDIRECT_URI,
-    scope: 'identify guilds.members.read',
-    prompt: 'consent'
+    client_id: DISCORD_CLIENT_ID,
+    scope: DISCORD_SCOPE,
+    redirect_uri: redirectUri,
+    prompt: 'consent',
   });
-  res.writeHead(302, { Location: `https://discord.com/api/oauth2/authorize?${params}` });
+
+  res.setHeader('Cache-Control', 'no-store');
+  res.writeHead(302, { Location: `https://discord.com/oauth2/authorize?${params}` });
   res.end();
-}
+};
