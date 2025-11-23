@@ -1,6 +1,16 @@
-.controller.xbox {
+
+#controller {
     background: url(https://imgur.com/WnmsEb9) no-repeat center center;
     background-size: contain;
     width: 100%;
     aspect-ratio: 400 / 400;
+}
+
+#controller svg {
+    opacity: 0;
+}
+
+.button, .trigger, .bumper, .stick, .dpad {
+    position: relative;
+    z-index: 2;
 }
